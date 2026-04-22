@@ -1,0 +1,13 @@
+sudo apt update && sudo apt install openvswitch-switch -y
+
+sudo ovs-vsctl add-br br0
+sudo ovs-vsctl set-controller br0 tcp:192.168.5.3:6653
+sudo ovs-vsctl set bridge br0 protocols=OpenFlow13
+
+# Nối tới Gateway
+sudo ovs-vsctl add-port br0 vx-gw -- set interface vx-gw type=vxlan options:remote_ip=192.168.5.13
+
+# Nối tới 3 Switch nhánh
+sudo ovs-vsctl add-port br0 vx-s1 -- set interface vx-s1 type=vxlan options:remote_ip=192.168.5.4
+sudo ovs-vsctl add-port br0 vx-s2 -- set interface vx-s2 type=vxlan options:remote_ip=192.168.5.5
+sudo ovs-vsctl add-port br0 vx-s3 -- set interface vx-s3 type=vxlan options:remote_ip=192.168.5.6

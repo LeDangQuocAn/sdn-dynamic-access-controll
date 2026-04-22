@@ -1,0 +1,59 @@
+server {
+    listen 80 default_server;
+    server_name _;
+    root /var/www/html;
+    index index.html index.nginx-debian.html;
+}
+# Web Server 1
+server {
+    listen 80;
+    server_name web1.35.186.145.237.nip.io;
+
+    location / {
+        proxy_pass http://10.0.0.1;
+		proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+		proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        
+        # Tăng timeout vì gói tin qua nhiều switch SDN có thể chậm ở lần đầu
+        proxy_connect_timeout 15s;
+        proxy_send_timeout 15s;
+        proxy_read_timeout 15s;
+    }
+}
+
+# Web Server 2
+server {
+    listen 80;
+    server_name web2.35.186.145.237.nip.io;
+
+    location / {
+        proxy_pass http://10.0.0.2;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+		proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        
+        # Tăng timeout vì gói tin qua nhiều switch SDN có thể chậm ở lần đầu
+        proxy_connect_timeout 15s;
+        proxy_send_timeout 15s;
+        proxy_read_timeout 15s;
+    }
+}
+
+# Web Server 3
+server {
+    listen 80;
+    server_name web3.35.186.145.237.nip.io;
+
+    location / {
+        proxy_pass http://10.0.0.3;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+		proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        
+        # Tăng timeout vì gói tin qua nhiều switch SDN có thể chậm ở lần đầu
+        proxy_connect_timeout 15s;
+        proxy_send_timeout 15s;
+        proxy_read_timeout 15s;
+    }
+}
