@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from ryu.base import app_manager
 from ryu.controller import ofp_event
 from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER, set_ev_cls
@@ -14,23 +15,47 @@ class AuthController(app_manager.RyuApp):
         self.mac_to_port = {}
         self.base_dir = os.path.dirname(os.path.abspath(__file__))
 
-    def _load_ip_list(self, filename):
+    def _load_json_file(self, filename, default):
         file_path = os.path.join(self.base_dir, filename)
-        with open(file_path, 'r') as f:
-            data = json.load(f)
+        try:
+            with open(file_path, 'r') as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return default
+        except Exception as e:
+            self.logger.error("Lỗi đọc file %s: %s", filename, e)
+            return default
+
+        return data if isinstance(data, dict) else default
+
+    def _load_ip_list(self, filename):
+        data = self._load_json_file(filename, {})
         ips = data.get('ips', [])
         return ips if isinstance(ips, list) else []
+
+    def _load_sessions(self):
+        data = self._load_json_file('sessions.json', {})
+        sessions = data.get('sessions', {})
+        return sessions if isinstance(sessions, dict) else {}
+
+    def _is_session_active(self, src_ip):
+        sessions = self._load_sessions()
+        expires_at = sessions.get(src_ip)
+        if expires_at is None:
+            return False
+
+        try:
+            expires_at = float(expires_at)
+        except (TypeError, ValueError):
+            return False
+
+        return time.time() < expires_at
 
     def get_lists(self):
         # Đọc trực tiếp từ file mỗi lần gọi để lấy dữ liệu mới nhất (Dynamic)
         try:
             wl = self._load_ip_list('whitelist.json')
-            try:
-                bl = self._load_ip_list('blacklist.json')
-            except FileNotFoundError:
-                # Hỗ trợ tên file cũ để tránh vỡ demo khi chưa đổi tên file.
-                bl = self._load_ip_list('backlist.json')
-                self.logger.warning("Using legacy filename backlist.json. Please rename to blacklist.json.")
+            bl = self._load_ip_list('blacklist.json')
             return wl, bl
         except Exception as e:
             self.logger.error("Lỗi đọc file JSON: %s", e)
@@ -46,17 +71,27 @@ class AuthController(app_manager.RyuApp):
         actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
         self.add_flow(datapath, 0, match, actions)
 
-    def add_flow(self, datapath, priority, match, actions, buffer_id=None):
+    def add_flow(self, datapath, priority, match, actions, buffer_id=None, hard_timeout=None, idle_timeout=None):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
-        if buffer_id:
-            mod = parser.OFPFlowMod(datapath=datapath, buffer_id=buffer_id,
-                                    priority=priority, match=match,
-                                    instructions=inst)
-        else:
-            mod = parser.OFPFlowMod(datapath=datapath, priority=priority,
-                                    match=match, instructions=inst)
+        flow_kwargs = {
+            'datapath': datapath,
+            'priority': priority,
+            'match': match,
+            'instructions': inst,
+        }
+
+        if hard_timeout is not None:
+            flow_kwargs['hard_timeout'] = hard_timeout
+
+        if idle_timeout is not None:
+            flow_kwargs['idle_timeout'] = idle_timeout
+
+        if buffer_id is not None and buffer_id != ofproto.OFP_NO_BUFFER:
+            flow_kwargs['buffer_id'] = buffer_id
+
+        mod = parser.OFPFlowMod(**flow_kwargs)
         datapath.send_msg(mod)
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
@@ -84,20 +119,23 @@ class AuthController(app_manager.RyuApp):
         if pkt_ipv4:
             src_ip = pkt_ipv4.src
             wl, bl = self.get_lists()
+            session_active = self._is_session_active(src_ip)
 
             if src_ip in bl:
                 self.logger.info("BLOCKED: %s nằm trong Blacklist!", src_ip)
                 match = parser.OFPMatch(eth_type=0x0800, ipv4_src=src_ip)
                 # Action rỗng = DROP
-                self.add_flow(datapath, 100, match, []) 
+                self.add_flow(datapath, 100, match, [])
                 return
 
-            if src_ip not in wl:
+            if src_ip in wl:
+                self.logger.info("AUTHORIZED: %s hợp lệ theo whitelist tĩnh.", src_ip)
+            elif session_active:
+                self.logger.info("AUTHORIZED: %s còn trong phiên hợp lệ, cho phép đi qua.", src_ip)
+            else:
                 # In ra log nhưng KHÔNG đẩy rule, để giữ trạng thái chờ xác thực
                 self.logger.info("UNAUTHORIZED: %s chưa xác thực. Drop gói tin.", src_ip)
                 return
-
-            self.logger.info("AUTHORIZED: %s hợp lệ, cho phép đi qua.", src_ip)
 
         # L2 Forwarding bình thường cho ARP và các IP Whitelist
         if dst_mac in self.mac_to_port[dpid]:
@@ -110,7 +148,8 @@ class AuthController(app_manager.RyuApp):
         # Lưu rule lại để lần sau không cần hỏi Controller
         if out_port != ofproto.OFPP_FLOOD:
             match = parser.OFPMatch(in_port=in_port, eth_dst=dst_mac, eth_src=src_mac)
-            self.add_flow(datapath, 1, match, actions, msg.buffer_id)
+            flow_hard_timeout = 60 if pkt_ipv4 and session_active else None
+            self.add_flow(datapath, 1, match, actions, msg.buffer_id, hard_timeout=flow_hard_timeout)
 
         data = None
         if msg.buffer_id == ofproto.OFP_NO_BUFFER:
