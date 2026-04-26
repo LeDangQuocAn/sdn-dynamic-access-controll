@@ -1,7 +1,7 @@
 sudo apt update && sudo apt install openvswitch-switch -y
 
 sudo ovs-vsctl add-br br-int
-sudo ovs-vsctl add-port br-int vx-s1 -- set interface vx-s1 type=vxlan options:remote_ip=192.168.5.6
+sudo ovs-vsctl add-port br-int vx-s3 -- set interface vx-s3 type=vxlan options:remote_ip=192.168.5.6
 sudo ip addr add 10.0.0.3/24 dev br-int
 sudo ip link set br-int up mtu 1400
 
