@@ -127,9 +127,7 @@ class AuthController(app_manager.RyuApp):
             src_ip = pkt_ipv4.src
             dst_ip = pkt_ipv4.dst
             wl, bl = self.get_lists()
-            # Reverse proxy gửi lưu lượng vào backend với src là gateway,
-            # nên cho phép session theo cả src_ip và dst_ip.
-            session_active = self._is_session_active(src_ip) or self._is_session_active(dst_ip)
+            session_active = self._is_session_active(src_ip)
 
             if src_ip in bl or dst_ip in bl:
                 self.logger.info("BLOCKED: %s -> %s vi phạm blacklist.", src_ip, dst_ip)
