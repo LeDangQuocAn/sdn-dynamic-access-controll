@@ -113,28 +113,38 @@ class AuthController(app_manager.RyuApp):
         dpid = datapath.id
         self.mac_to_port.setdefault(dpid, {})
         self.mac_to_port[dpid][src_mac] = in_port
+        session_active = False
 
         # BẮT ĐẦU LOGIC AUTHENTICATE
         pkt_ipv4 = pkt.get_protocol(ipv4.ipv4)
         if pkt_ipv4:
             src_ip = pkt_ipv4.src
+            dst_ip = pkt_ipv4.dst
             wl, bl = self.get_lists()
-            session_active = self._is_session_active(src_ip)
+            session_active = self._is_session_active(src_ip) or self._is_session_active(dst_ip)
 
-            if src_ip in bl:
-                self.logger.info("BLOCKED: %s nằm trong Blacklist!", src_ip)
-                match = parser.OFPMatch(eth_type=0x0800, ipv4_src=src_ip)
+            controlled_ips = set(wl) | set(bl)
+            sessions = self._load_sessions()
+            controlled_ips.update(sessions.keys())
+            is_controlled_traffic = (src_ip in controlled_ips) or (dst_ip in controlled_ips)
+
+            if src_ip in bl or dst_ip in bl:
+                self.logger.info("BLOCKED: %s -> %s vi phạm blacklist.", src_ip, dst_ip)
+                if dst_ip in bl:
+                    match = parser.OFPMatch(eth_type=0x0800, ipv4_dst=dst_ip)
+                else:
+                    match = parser.OFPMatch(eth_type=0x0800, ipv4_src=src_ip)
                 # Action rỗng = DROP
                 self.add_flow(datapath, 100, match, [])
                 return
 
-            if src_ip in wl:
-                self.logger.info("AUTHORIZED: %s hợp lệ theo whitelist tĩnh.", src_ip)
+            if src_ip in wl or dst_ip in wl:
+                self.logger.info("AUTHORIZED: %s -> %s hợp lệ theo whitelist tĩnh.", src_ip, dst_ip)
             elif session_active:
-                self.logger.info("AUTHORIZED: %s còn trong phiên hợp lệ, cho phép đi qua.", src_ip)
-            else:
-                # In ra log nhưng KHÔNG đẩy rule, để giữ trạng thái chờ xác thực
-                self.logger.info("UNAUTHORIZED: %s chưa xác thực. Drop gói tin.", src_ip)
+                self.logger.info("AUTHORIZED: %s -> %s còn trong phiên hợp lệ.", src_ip, dst_ip)
+            elif is_controlled_traffic:
+                # Chỉ chặn lưu lượng liên quan tới nhóm IP cần kiểm soát
+                self.logger.info("UNAUTHORIZED: %s -> %s chưa xác thực. Drop gói tin.", src_ip, dst_ip)
                 return
 
         # L2 Forwarding bình thường cho ARP và các IP Whitelist
@@ -147,9 +157,42 @@ class AuthController(app_manager.RyuApp):
 
         # Lưu rule lại để lần sau không cần hỏi Controller
         if out_port != ofproto.OFPP_FLOOD:
-            match = parser.OFPMatch(in_port=in_port, eth_dst=dst_mac, eth_src=src_mac)
-            flow_hard_timeout = 60 if pkt_ipv4 and session_active else None
-            self.add_flow(datapath, 1, match, actions, msg.buffer_id, hard_timeout=flow_hard_timeout)
+            if pkt_ipv4:
+                match = parser.OFPMatch(
+                    in_port=in_port,
+                    eth_type=0x0800,
+                    ipv4_src=pkt_ipv4.src,
+                    ipv4_dst=pkt_ipv4.dst,
+                    eth_dst=dst_mac,
+                    eth_src=src_mac,
+                )
+                flow_hard_timeout = 60 if session_active else None
+                flow_idle_timeout = 30
+                self.add_flow(
+                    datapath,
+                    1,
+                    match,
+                    actions,
+                    msg.buffer_id,
+                    hard_timeout=flow_hard_timeout,
+                    idle_timeout=flow_idle_timeout,
+                )
+            else:
+                # Ghim ARP/L2 theo eth_type để không vô tình bypass kiểm soát IPv4.
+                match = parser.OFPMatch(
+                    in_port=in_port,
+                    eth_type=eth.ethertype,
+                    eth_dst=dst_mac,
+                    eth_src=src_mac,
+                )
+                self.add_flow(
+                    datapath,
+                    1,
+                    match,
+                    actions,
+                    msg.buffer_id,
+                    idle_timeout=15,
+                )
 
         data = None
         if msg.buffer_id == ofproto.OFP_NO_BUFFER:
