@@ -9,6 +9,8 @@ from ryu.lib.packet import packet, ethernet, ether_types, ipv4
 
 class AuthController(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
+    GATEWAY_IP = '10.0.0.254'
+    PROTECTED_SUBNET_PREFIX = '10.0.0.'
 
     def __init__(self, *args, **kwargs):
         super(AuthController, self).__init__(*args, **kwargs)
@@ -61,11 +63,15 @@ class AuthController(app_manager.RyuApp):
             self.logger.error("Lỗi đọc file JSON: %s", e)
             return [], []
 
+    def _is_protected_backend(self, ip_addr):
+        return ip_addr.startswith(self.PROTECTED_SUBNET_PREFIX) and ip_addr != self.GATEWAY_IP
+
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
         datapath = ev.msg.datapath
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
+        self.logger.info("Switch connected: dpid=%s", datapath.id)
         # Rule mặc định: Gửi mọi gói tin lên Controller
         match = parser.OFPMatch()
         actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
@@ -121,12 +127,7 @@ class AuthController(app_manager.RyuApp):
             src_ip = pkt_ipv4.src
             dst_ip = pkt_ipv4.dst
             wl, bl = self.get_lists()
-            session_active = self._is_session_active(src_ip) or self._is_session_active(dst_ip)
-
-            controlled_ips = set(wl) | set(bl)
-            sessions = self._load_sessions()
-            controlled_ips.update(sessions.keys())
-            is_controlled_traffic = (src_ip in controlled_ips) or (dst_ip in controlled_ips)
+            session_active = self._is_session_active(src_ip)
 
             if src_ip in bl or dst_ip in bl:
                 self.logger.info("BLOCKED: %s -> %s vi phạm blacklist.", src_ip, dst_ip)
@@ -142,8 +143,9 @@ class AuthController(app_manager.RyuApp):
                 self.logger.info("AUTHORIZED: %s -> %s hợp lệ theo whitelist tĩnh.", src_ip, dst_ip)
             elif session_active:
                 self.logger.info("AUTHORIZED: %s -> %s còn trong phiên hợp lệ.", src_ip, dst_ip)
-            elif is_controlled_traffic:
-                # Chỉ chặn lưu lượng liên quan tới nhóm IP cần kiểm soát
+            elif self._is_protected_backend(dst_ip):
+                # Với mô hình reverse proxy, src_ip thường là Gateway (10.0.0.254).
+                # Vì vậy chặn dựa trên đích backend chưa được whitelist/session.
                 self.logger.info("UNAUTHORIZED: %s -> %s chưa xác thực. Drop gói tin.", src_ip, dst_ip)
                 return
 
